@@ -42,7 +42,7 @@ meson compile -C build
 meson test -C build
 sudo meson install -C build
 
-"$PREFIX/bin/Xorg" -version 2>&1 | head -3
+"$PREFIX/bin/Xorg" -version 2>&1 | grep 'X Server'
 ls "$PREFIX"/lib/xorg/modules/xlibre-25/{drivers/modesetting_drv.so,input/libinput_drv.so}
 
 [ "${1:-}" = --use-ly ] && set_ly $PREFIX/bin/X
