@@ -740,17 +740,25 @@ xf86CheckSlot(const void *ptr, BusType type)
 #endif
         const char *msOther = NULL;
         const char *fbOther = NULL;
+        const char *owner;
 
-        if (pent->numInstances <= 0) {
+        if (pent->bus.type == BUS_NONE && pent->numInstances <= 0) {
         /* All devices are unclaimed, ignore this entity */
             continue;
         }
+
+        /*
+         * GPU screens added by xf86platformAddGPUDevices() own their
+         * slot without any Device section attached.
+         */
+        owner = pent->numInstances > 0 ? pent->devices[0]->identifier
+                                       : pent->driver->driverName;
 
         if ((fbPath != NULL) && (*fbPath == '\0')) {
             /* Autoconfigured fbdev device is incompatible with anything */
             LogMessageVerb(X_INFO, 1,
                 "\"%s\" must be the only device, but \"%s\" is present.\n",
-                fb_ptr->identifier, pent->devices[0]->identifier);
+                fb_ptr->identifier, owner);
             return FALSE;
         }
 
@@ -772,7 +780,7 @@ xf86CheckSlot(const void *ptr, BusType type)
                 LogMessageVerb(X_INFO, 1,
                     "  PCI bus id %u@%u:%u:%u has already been claimed by \"%s\".\n",
                     pci_ptr->domain, pci_ptr->bus, pci_ptr->dev, pci_ptr->func, 
-                    pent->devices[0]->identifier);
+                    owner);
                 return FALSE;
             }
             else
@@ -840,7 +848,7 @@ xf86CheckSlot(const void *ptr, BusType type)
             /* This DRI device has been claimed already */
                     LogMessageVerb(X_INFO, 1,
                         " DRI device \"%s\" has already been claimed by \"%s\".\n",
-                        msPath, pent->devices[0]->identifier);
+                        msPath, owner);
             return FALSE;
         }
     }
