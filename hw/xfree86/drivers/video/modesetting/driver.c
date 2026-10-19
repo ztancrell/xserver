@@ -269,6 +269,38 @@ ms_close_hw(int fd)
     return close(fd);
 }
 
+/*
+ * Find the node open_hw(NULL) would use: $KMSDEVICE if it opens,
+ * otherwise the first /dev/dri/card* that supports dumb buffers.
+ */
+static const char *
+ms_default_dev(void)
+{
+    static char buf[] = "/dev/dri/cardxx";
+    const char *dev = getenv("KMSDEVICE");
+    int i, fd;
+
+    if (dev && (fd = ms_try_open(dev)) >= 0) {
+        ms_close_hw(fd);
+        return dev;
+    }
+
+    for (i = 0; i < 32; i++) {
+        sprintf(buf, "/dev/dri/card%d", i);
+
+        if ((fd = ms_try_open(buf)) >= 0) {
+            uint64_t check_dumb = 0;
+            bool ok = drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &check_dumb) >= 0 && check_dumb;
+
+            ms_close_hw(fd);
+            if (ok)
+                return buf;
+        }
+    }
+
+    return NULL;
+}
+
 static int
 open_hw(const char *dev)
 {
@@ -277,30 +309,12 @@ open_hw(const char *dev)
     if ((fd = get_passed_fd()) != -1)
         return fd;
 
-    if (dev) {
-        fd = ms_try_open(dev);
-    } else {
-        dev = getenv("KMSDEVICE");
-        if ((NULL == dev) || ((fd = ms_try_open(dev)) < 0)) {
-            int i;
-            char buf[] = "/dev/dri/cardxx";
-
-            for (i = 0; i < 32; i++) {
-                sprintf(buf, "/dev/dri/card%d", i);
-
-                if ((fd = ms_try_open(buf)) >= 0) {
-                    uint64_t check_dumb = 0;
-
-                    if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &check_dumb) >= 0 && check_dumb) {
-                        break;
-                    }
-
-                    ms_close_hw(fd);
-                    fd = -1;
-                }
-            }
-        }
+    if (!dev && !(dev = ms_default_dev())) {
+        xf86DrvMsg(-1, X_ERROR, "open default device: no usable /dev/dri/card* found\n");
+        return -1;
     }
+
+    fd = ms_try_open(dev);
     if (fd == -1) {
         xf86DrvMsg(-1, X_ERROR, "open %s: %s\n", dev, strerror(errno));
     } else if (fd < -1) {
@@ -552,6 +566,16 @@ Probe(DriverPtr drv, int flags)
         int entity_num = -1;
         ScrnInfoPtr scrn = NULL;
         const char *dev = xf86FindOptionValue(devSections[i]->options, "kmsdev");
+
+        /*
+         * Record the node we will actually open, so xf86ClaimFbSlot()
+         * can see if a platform driver has already claimed it.
+         */
+        if (!dev && (dev = ms_default_dev()) != NULL) {
+            devSections[i]->options =
+                xf86ReplaceStrOption(devSections[i]->options, "kmsdev", dev);
+            dev = xf86FindOptionValue(devSections[i]->options, "kmsdev");
+        }
 
         if (probe_hw(dev, NULL)) {
             entity_num = xf86ClaimFbSlot(drv, 0, devSections[i], TRUE);
