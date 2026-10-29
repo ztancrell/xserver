@@ -478,7 +478,7 @@ class TestXIDevicePropertyNotifySwap:
         can trigger against every session on the server.
 
         Fixed by wiring EventSwapVector[DevicePropertyNotify] to
-        SEventIDispatch in IExtensionInit() (Xext/xinput/extinit.c),
+        SEventIDispatch in XInputExtensionInit() (Xext/xinput/extinit.c),
         matching IResetProc() and the SEventIDispatch dispatch table.
         """
         c = xi_xclient_swapped
@@ -515,9 +515,18 @@ class TestXIDevicePropertyNotifySwap:
             )
         )
 
-        c.flush_responses(timeout=1.0)
-
-        assert xserver.is_alive, (
-            "Server crashed delivering a swapped DevicePropertyNotify "
+        # Check for the event itself, not xserver.is_alive: when the server
+        # dies the socket closes before Xvfb has exited, so is_alive can
+        # still be true here.
+        events = [
+            r
+            for r in c.flush_responses(timeout=1.0)
+            if r.response_type & 0x7F == prop_notify_type
+        ]
+        assert events, (
+            "No DevicePropertyNotify received; server likely crashed "
             "(missing EventSwapVector[DevicePropertyNotify] handler)"
         )
+
+        atom = struct.unpack_from(f"{c._byte_order}I", events[0].data, 8)[0]
+        assert atom == prop, "DevicePropertyNotify atom not byte-swapped"
