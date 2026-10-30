@@ -333,6 +333,7 @@ ms_tearfree_dri_flip(modesettingPtr ms, xf86CrtcPtr crtc, void *event,
     struct ms_flipdata *flipdata;
     RegionRec region;
     RegionPtr dirty;
+    Bool no_damage;
 
     if (!ms_tearfree_is_active_on_crtc(crtc))
         return FALSE;
@@ -345,12 +346,14 @@ ms_tearfree_dri_flip(modesettingPtr ms, xf86CrtcPtr crtc, void *event,
     /* Compute how much of the current damage intersects with this CRTC */
     RegionInit(&region, &crtc->bounds, 0);
     RegionIntersect(&region, &region, dirty);
+    no_damage = RegionNil(&region);
+    RegionUninit(&region);
 
     /* No damage on this CRTC means no TearFree flip. This means the DRI client
      * didn't change this CRTC's contents at all with its presentation, possibly
      * because its window is fully occluded by another window on this CRTC.
      */
-    if (RegionNil(&region))
+    if (no_damage)
         return FALSE;
 
     flip = calloc(1, sizeof(*flip));

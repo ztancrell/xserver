@@ -762,6 +762,7 @@ ms_tearfree_update_damages(ScreenPtr pScreen)
                              pScreen->GetScreenPixmap(pScreen),
                              NULL, ms->drmmode.fb_id, 0, 0);
         }
+        RegionUninit(&region);
     }
     DamageEmpty(ms->damage);
 }
