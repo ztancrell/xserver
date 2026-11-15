@@ -25,7 +25,8 @@
 #   MESON_ARGS, MESON_TEST_ARGS, FDO_CI_CONCURRENT  (passed into the rootfs)
 #
 # Run as root (workflow uses `sudo`). The runner's own OS stays untouched:
-# only qemu-user-static/binfmt-support/debootstrap get installed on it.
+# only qemu-user-static (or qemu-user + qemu-user-binfmt), binfmt-support and
+# debootstrap get installed on it.
 
 set -e
 set -x  # Debug: print every command
@@ -54,11 +55,23 @@ echo "=== [$(date)] Starting QEMU build for $ARCH ($QEMU, $SUITE, $MIRROR) ==="
 # --- host side: prepare the emulator + debootstrap -------------------------
 echo "=== [$(date)] Installing host packages ==="
 apt-get update
-apt-get install -y \
-    qemu-user-static \
-    binfmt-support \
-    debootstrap \
-    wget
+# Ubuntu 26.04 dropped qemu-user-static: qemu-user now ships the static
+# binaries (without the -static suffix) and qemu-user-binfmt registers them.
+if ! apt-get install -y qemu-user-static binfmt-support debootstrap wget; then
+    apt-get install -y qemu-user qemu-user-binfmt binfmt-support debootstrap wget
+fi
+
+QEMU_BIN=/usr/bin/$QEMU
+[ -x "$QEMU_BIN" ] || QEMU_BIN=/usr/bin/${QEMU%-static}
+# binfmt_misc runs the interpreter at its registered path inside the chroot
+QEMU_BINFMT=/proc/sys/fs/binfmt_misc/$(basename "${QEMU%-static}")
+[ -e "$QEMU_BINFMT" ] || systemctl restart systemd-binfmt || true
+if [ ! -x "$QEMU_BIN" ] || [ ! -e "$QEMU_BINFMT" ]; then
+    echo "ERROR: no $QEMU_BIN or no binfmt_misc entry $QEMU_BINFMT" >&2
+    exit 1
+fi
+cat "$QEMU_BINFMT"
+QEMU_INTERP=$(grep '^interpreter ' "$QEMU_BINFMT" | cut -d' ' -f2)
 
 # debian-ports (sparc64/alpha) needs the ports archive keyring. The one
 # shipped by the runner's distro (Ubuntu) is routinely out of date and misses
@@ -100,7 +113,8 @@ debootstrap \
 
 # --- register the emulator inside the rootfs and finish the bootstrap -------
 echo "=== [$(date)] Copying qemu binary and running --second-stage ==="
-cp "/usr/bin/$QEMU" "$ROOTFS/usr/bin/"
+mkdir -p "$ROOTFS$(dirname "${QEMU_INTERP:-$QEMU_BIN}")"
+cp "$QEMU_BIN" "$ROOTFS${QEMU_INTERP:-$QEMU_BIN}"
 chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
 
 # Copy debian-ports keyring into chroot for apt verification. apt only trusts
@@ -294,6 +308,59 @@ echo "=== [$(date)] build done ==="
 RUN_BUILD_END
 chmod +x "$ROOTFS/run-build.sh"
 
+# The sun* drivers use the SBUS API, which the server builds only on SPARC,
+# so their symbol check runs here instead of in the x86 driver jobs.
+echo "=== [$(date)] Creating run-sun-drivers.sh ==="
+cat > "$ROOTFS/run-sun-drivers.sh" <<'RUN_SUN_DRIVERS'
+#!/bin/bash
+set -e
+set -x
+
+export PKG_CONFIG_PATH="/opt/xorgproto/lib/pkgconfig:/opt/xorgproto/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+annotate() {
+    local msg=${1//'%'/%25}
+    echo "::error::${msg//$'\n'/%0A}"
+}
+
+echo "=== [$(date)] Installing the server ==="
+meson install --no-rebuild -C /src/_build
+abi_tools=$(pkg-config --variable=abi_tools_dir xorg-server)
+prefix=$(pkg-config --variable=prefix xorg-server)
+
+mkdir -p /sun-drivers
+cd /sun-drivers
+failed=
+for drv in suncg3 suncg6 suncg14 sunffb sunleo suntcx; do
+    echo "=== [$(date)] Building xf86-video-$drv ==="
+    tag=xlibre-xf86-video-$drv-25.0.0
+    wget -qO "$drv.tar.gz" \
+        "https://github.com/X11Libre/xf86-video-$drv/archive/refs/tags/$tag.tar.gz"
+    rm -rf "$drv"
+    mkdir "$drv"
+    tar -xzf "$drv.tar.gz" -C "$drv" --strip-components=1
+    (cd "$drv" && autoreconf -fi && ./configure && make -j"${FDO_CI_CONCURRENT:-2}")
+    modules=$(find "$drv" -path '*/.libs/*_drv.so')
+    if [ -z "$modules" ]; then
+        annotate "no *_drv.so built for xf86-video-$drv"
+        failed="$failed $drv"
+    fi
+    for mod in $modules; do
+        if ! out=$("$abi_tools/check-symbols.sh" --prefix "$prefix" "$mod" 2>&1); then
+            annotate "$out"
+            failed="$failed $mod"
+        else
+            echo "$out"
+        fi
+    done
+done
+if [ -n "$failed" ]; then
+    echo "symbol check failed:$failed" >&2
+    exit 1
+fi
+RUN_SUN_DRIVERS
+chmod +x "$ROOTFS/run-sun-drivers.sh"
+
 # --- run the build inside the rootfs -----------------------------------------
 # Bind-mount the host's /proc, /sys and /dev into the rootfs. Several package
 # postinst maintainer scripts (e.g. openjdk-25-jre-headless on alpha, which
@@ -310,6 +377,10 @@ echo "=== [$(date)] Running install-prereq.sh in chroot ==="
 ARCH="$ARCH" chroot "$ROOTFS" /install-prereq.sh
 echo "=== [$(date)] Running run-build.sh in chroot ==="
 chroot "$ROOTFS" /run-build.sh
+if [ "$ARCH" = sparc64 ]; then
+    echo "=== [$(date)] Running run-sun-drivers.sh in chroot ==="
+    chroot "$ROOTFS" /run-sun-drivers.sh
+fi
 
 echo "=== [$(date)] Unmounting rootfs ==="
 for m in /proc /sys /dev; do
