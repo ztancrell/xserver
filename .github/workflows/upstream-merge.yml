@@ -1,0 +1,144 @@
+# Homestead fork only: weekly merge of X11Libre master into the branch `upstream-merge`, built and
+# unit-tested in Arch, then a PR into this fork's master. Never pushes master, never touches X11Libre.
+name: upstream-merge
+on:
+  schedule:
+    - cron: '23 5 * * 1'  # Mondays
+  workflow_dispatch:
+    inputs:
+      ignore_noise_filter:
+        description: 'Merge even if the new upstream commits only touch CI/docs (tests the merge path)'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+concurrency:
+  group: upstream-merge
+defaults:
+  run:
+    shell: bash
+env:
+  UPSTREAM: https://github.com/X11Libre/xserver.git
+  GH_TOKEN: ${{ github.token }}
+  REPO: ${{ github.repository }}
+  # Groups that fail on master today; reported, but they do not fail the job.
+  KNOWN_FAILURES: signal_logging_test protocol_xigetselectedevents_test protocol_xipassivegrabdevice_test protocol_eventconvert_test
+jobs:
+  merge:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container: archlinux:base-devel
+    steps:
+      - name: Install git and gh
+        run: pacman -Syu --noconfirm --needed git github-cli
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Find new upstream commits
+        id: new
+        run: |
+          git config --global --add safe.directory "$PWD"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898283+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags "$UPSTREAM" master:refs/remotes/upstream/master
+          range="master..upstream/master"
+          echo "range=$(git rev-parse --short master)..$(git rev-parse --short upstream/master)" >> "$GITHUB_OUTPUT"
+          git log --format='- %h %s' "$range" > commits.txt
+          n=$(wc -l < commits.txt)
+          # Paths that never change the built server: CI config and docs.
+          real=$(git log --format= --name-only "$range" | sort -u |
+            grep -vE '^$|^(\.github/|\.gitlab-ci|.*\.md$|(.*/)?README)' || true)
+          if [ "$n" -eq 0 ]; then
+            echo "Nothing new upstream." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -z "$real" ] && [ "${{ inputs.ignore_noise_filter }}" != true ]; then
+            echo "$n new upstream commit(s), CI/docs only; nothing to merge." | tee -a "$GITHUB_STEP_SUMMARY"
+            cat commits.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "go=1" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Merge into upstream-merge
+        if: steps.new.outputs.go
+        run: |
+          git checkout -B upstream-merge master
+          if ! git merge --no-ff --no-edit -m "merge: upstream X11Libre master (${{ steps.new.outputs.range }})" upstream/master; then
+            files=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            { echo "The weekly upstream merge of \`${{ steps.new.outputs.range }}\` conflicts."
+              echo; echo "Conflicting files:"; sed 's/^/- /' <<<"$files"
+              echo; echo "New upstream commits:"; cat commits.txt
+              echo; echo "Run: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"; } > issue.md
+            cat issue.md >> "$GITHUB_STEP_SUMMARY"
+            gh label create upstream-merge --repo "$REPO" --color d93f0b --force
+            num=$(gh issue list --repo "$REPO" --label upstream-merge --state open --json number -q '.[0].number')
+            if [ -n "$num" ]; then gh issue comment "$num" --repo "$REPO" --body-file issue.md
+            else gh issue create --repo "$REPO" --label upstream-merge --title "Upstream merge conflict" --body-file issue.md; fi
+            exit 1
+          fi
+          # GITHUB_TOKEN may not push workflow-file changes: keep the fork's versions, list them in the PR.
+          git diff --name-only master -- .github/workflows > workflows.txt
+          if [ -s workflows.txt ]; then
+            git restore --source=master --staged --worktree .github/workflows
+            git commit --amend --no-edit
+          fi
+      - name: Install build dependencies (PKGBUILD makedepends + depends)
+        if: steps.new.outputs.go
+        run: |
+          pacman -S --noconfirm --needed meson dbus libbsd libdrm libepoxy libglvnd libpciaccess libtirpc \
+            libxau libxcvt libxdmcp libxfont2 libxshmfence nettle pixman systemd-libs xkeyboard-config \
+            xorg-setxkbmap xorg-xkbcomp mesa xorg-util-macros xorgproto libx11 libxkbfile libxres systemd \
+            xorg-font-util xtrans
+      - name: Build
+        id: build
+        if: steps.new.outputs.go
+        run: |
+          # zpt-cachy's PKGBUILD options, except tests=true.
+          arch-meson . build -D xorg=true -D glamor=true -D udev=true -D systemd_logind=true \
+            -D seatd_libseat=false -D xvfb=false -D xnest=false -D suid_wrapper=false \
+            -D legacy_nvidia_padding=false -D xkb_dir=/usr/share/X11/xkb -D xkb_output_dir=/var/lib/xkb \
+            -D tests=true
+          meson compile -C build
+      - name: Unit tests, one group at a time
+        id: test
+        if: steps.new.outputs.go
+        run: |
+          # test/tests-common.c exits 0 when a group dies from an assert after an earlier test in it
+          # passed, so a group passes only on exit 0 with " Pass" and no " FAIL".
+          bad= ; fixed=
+          echo '| Group | Result |' > tests.md; echo '|---|---|' >> tests.md
+          for g in $(grep -oP '^\s*run_test\(\K\w+' test/tests.c); do
+            rc=0; out=$(cd build && XLIBRE_TEST=$g timeout 300 ./test/tests 2>&1) || rc=$?
+            if [ $rc -ne 0 ] || grep -q ' FAIL' <<<"$out"; then r=fail
+            elif grep -q ' Pass' <<<"$out"; then r=pass
+            else r='not built'; fi
+            known=; [[ " $KNOWN_FAILURES " == *" $g "* ]] && known=1
+            if [ "$r" = fail ] && [ -n "$known" ]; then r='fail (known)'
+            elif [ "$r" = fail ]; then bad="$bad $g"; echo "::group::$g output"; tail -30 <<<"$out"; echo '::endgroup::'
+            elif [ "$r" = pass ] && [ -n "$known" ]; then r='pass (known failure now passes)'; fixed="$fixed $g"; fi
+            echo "| $g | $r |" >> tests.md
+          done
+          [ -z "$fixed" ] || echo "Known failures that now pass:$fixed" >> tests.md
+          [ -z "$bad" ] || echo "New failures:$bad" >> tests.md
+          cat tests.md
+          [ -z "$bad" ]
+      - name: Push upstream-merge and open or update the PR
+        if: always() && steps.new.outputs.go && steps.build.outcome != 'skipped'
+        run: |
+          build=${{ steps.build.outcome }}; tests=${{ steps.test.outcome }}
+          { echo "Weekly merge of X11Libre master \`${{ steps.new.outputs.range }}\` into this fork."
+            echo; echo "Build: **$build**. Unit tests: **$tests**. Run: $GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
+            if [ -s workflows.txt ]; then
+              echo; echo "Upstream changed these workflow files; GITHUB_TOKEN cannot push them, so this branch keeps the fork's versions. Sync them by hand (\`git checkout upstream/master -- <file>\`):"
+              sed 's/^/- /' workflows.txt
+            fi
+            echo; echo "## New upstream commits"; cat commits.txt
+            echo; echo "## Unit-test groups"; cat tests.md 2>/dev/null || echo "(not run)"; } > pr.md
+          cat pr.md >> "$GITHUB_STEP_SUMMARY"
+          git push --force origin upstream-merge
+          num=$(gh pr list --repo "$REPO" --base master --head upstream-merge --state open --json number -q '.[0].number')
+          if [ -n "$num" ]; then gh pr edit "$num" --repo "$REPO" --body-file pr.md
+          else gh pr create --repo "$REPO" --base master --head upstream-merge \
+            --title "Merge upstream X11Libre master" --body-file pr.md; fi
