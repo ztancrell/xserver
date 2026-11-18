@@ -616,7 +616,7 @@ SingleXvPutImage(ClientPtr client)
     XvPortPtr pPort;
     XvImagePtr pImage = NULL;
     GCPtr pGC;
-    int status, i, size;
+    int status, i;
     CARD16 width, height;
 
     VALIDATE_DRAWABLE_AND_GC(stuff->drawable, pDraw, DixWriteAccess);
@@ -645,8 +645,11 @@ SingleXvPutImage(ClientPtr client)
 
     width = stuff->width;
     height = stuff->height;
-    size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage, &width,
-                                                       &height, NULL, NULL);
+    int size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage, &width,
+                                                           &height, NULL, NULL);
+    if (size < 0)
+        return BadValue;
+
     size += sizeof(xvPutImageReq);
     size = bytes_to_int32(size);
 
@@ -819,7 +822,7 @@ ProcXvQueryImageAttributes(ClientPtr client)
     X_REQUEST_FIELD_CARD16(width);
     X_REQUEST_FIELD_CARD16(height);
 
-    int size, num_planes, i;
+    int num_planes, i;
     CARD16 width, height;
     XvImagePtr pImage = NULL;
     XvPortPtr pPort;
@@ -855,9 +858,13 @@ ProcXvQueryImageAttributes(ClientPtr client)
     width = stuff->width;
     height = stuff->height;
 
-    size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage,
-                                                       &width, &height, offsets,
-                                                       pitches);
+    int size = (*pPort->pAdaptor->ddQueryImageAttributes) (pPort, pImage,
+                                                           &width, &height, offsets,
+                                                           pitches);
+    if (size < 0) {
+        x_rpcbuf_clear(&rpcbuf);
+        return BadValue;
+    }
 
     xvQueryImageAttributesReply reply = {
         .num_planes = num_planes,
