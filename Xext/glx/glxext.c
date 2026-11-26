@@ -351,9 +351,11 @@ maybe_swap32(ClientPtr client, int x)
 static GlxServerVendor *
 vendorForScreen(ClientPtr client, int screen)
 {
-    screen = maybe_swap32(client, screen);
+    ScreenPtr pScreen = dixGetScreenPtr(maybe_swap32(client, screen));
+    if (!pScreen)
+        return NULL;
 
-    return glxServer.getVendorForScreen(client, dixGetScreenPtr(screen));
+    return glxServer.getVendorForScreen(client, pScreen);
 }
 
 /* this ought to be generated */
