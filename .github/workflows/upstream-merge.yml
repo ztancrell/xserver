@@ -27,7 +27,8 @@ env:
   KNOWN_FAILURES: signal_logging_test protocol_xigetselectedevents_test protocol_xipassivegrabdevice_test protocol_eventconvert_test
 jobs:
   merge:
-    if: github.ref == 'refs/heads/master'
+    # Only in a ztancrell fork, on its master: never runs in X11Libre or any other copy of this file.
+    if: github.repository_owner == 'ztancrell' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container: archlinux:base-devel
@@ -95,7 +96,7 @@ jobs:
         id: build
         if: steps.new.outputs.go
         run: |
-          # zpt-cachy's PKGBUILD options, except tests=true.
+          # zpt-artix's PKGBUILD options, except tests=true.
           arch-meson . build -D xorg=true -D glamor=true -D udev=true -D systemd_logind=true \
             -D seatd_libseat=false -D xvfb=false -D xnest=false -D suid_wrapper=false \
             -D legacy_nvidia_padding=false -D xkb_dir=/usr/share/X11/xkb -D xkb_output_dir=/var/lib/xkb \
