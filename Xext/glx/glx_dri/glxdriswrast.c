@@ -96,6 +96,10 @@ __glXDRIdrawableSwapBuffers(ClientPtr client, __GLXdrawable * drawable)
     __GLXDRIdrawable *private = (__GLXDRIdrawable *) drawable;
     const __DRIcoreExtension *core = private->screen->core;
 
+    /* NULL in Mesa's libdril stub driver, see __glXDRIscreenCreateContext */
+    if (!core->swapBuffers)
+        return FALSE;
+
     (*core->swapBuffers) (private->driDrawable);
 
     return TRUE;
@@ -210,7 +214,16 @@ __glXDRIscreenCreateContext(__GLXscreen * baseScreen,
      */
     (void) num_attribs;
     (void) attribs;
-    (void) error;
+
+    /* The swrast DRI driver may be Mesa's libdril stub (Mesa 26.3.1), which
+     * only lists fbconfigs: these core entries are NULL and createNewContext
+     * returns NULL. Refuse the context instead of calling through NULL later.
+     */
+    if (!core->createNewContext || !core->destroyContext ||
+        !core->bindContext || !core->unbindContext || !core->copyContext) {
+        *error = BadAlloc;
+        return NULL;
+    }
 
     shareContext = (__GLXDRIcontext *) baseShareContext;
     if (shareContext)
@@ -233,6 +246,11 @@ __glXDRIscreenCreateContext(__GLXscreen * baseScreen,
     context->driContext =
         (*core->createNewContext) (screen->driScreen, driConfig, driShare,
                                    context);
+    if (context->driContext == NULL) {
+        free(context);
+        *error = BadAlloc;
+        return NULL;
+    }
 
     return &context->base;
 }
