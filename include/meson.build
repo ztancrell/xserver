@@ -1,4 +1,7 @@
-version_split = meson.project_version().split('.')
+# keep a pre-release suffix such as "-rc1" out of the version numbers
+version_number = meson.project_version().split('-')[0]
+version_suffix = meson.project_version().replace(version_number, '')
+version_split = version_number.split('.')
 major = version_split[0].to_int()
 minor = version_split[1].to_int()
 patch = version_split[2].to_int()
@@ -98,6 +101,8 @@ conf_data.set('CONFIG_WSCONS', host_machine.system() in ['openbsd', 'netbsd'] ? 
 conf_data.set('HAVE_XSHMFENCE', xshmfence_dep.found() ? '1' : false)
 conf_data.set('WITH_LIBDRM', libdrm_required ? '1' : false)
 conf_data.set('LIBDRM_HAS_PLANE_SIZE_HINTS', libdrm_required ? libdrm_dep.version().version_compare('>= 2.4.122') : false)
+conf_data.set('LIBDRM_HAS_SYNCOBJ_EVENTFD',
+              libdrm_required and cc.has_function('drmSyncobjEventfd', dependencies: libdrm_dep) ? '1' : false)
 conf_data.set('GLAMOR_HAS_EGL', epoxy_dep.found() ? '1' : false)
 conf_data.set('GLXEXT', build_glx ? '1' : false)
 conf_data.set('GLAMOR', build_glamor ? '1' : false)
@@ -122,6 +127,8 @@ conf_data.set_quoted('SUID_WRAPPER_DIR', join_paths(get_option('prefix'), get_op
 conf_data.set_quoted('COMPILEDDEFAULTFONTPATH', default_font_path)
 
 conf_data.set('XORG_VERSION_CURRENT', release)
+conf_data.set_quoted('XLIBRE_VERSION_STRING', meson.project_version())
+conf_data.set_quoted('PACKAGE_VERSION_SUFFIX', version_suffix)
 
 conf_data.set('HASXDMAUTH', has_xdm_auth ? '1' : false)
 
@@ -364,7 +371,7 @@ conf_data.set_quoted('DEFAULT_LOGDIR', log_dir)
 
 version_data = configuration_data()
 version_data.set('VENDOR_RELEASE', '@0@'.format(release))
-version_data.set_quoted('VENDOR_MAN_VERSION', 'Version @0@.@1@.@2@'.format(major, minor, patch))
+version_data.set_quoted('VENDOR_MAN_VERSION', 'Version @0@'.format(meson.project_version()))
 configure_file(output : 'version-config.h',
                configuration : version_data)
 

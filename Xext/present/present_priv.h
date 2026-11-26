@@ -180,6 +180,10 @@ struct present_screen_priv {
     PixmapPtr                   flip_pixmap;
     present_fence_ptr           flip_idle_fence;
     Bool                        flip_sync;
+#ifdef DRI3
+    struct dri3_syncobj         *flip_release_syncobj;
+    uint64_t                    flip_release_point;
+#endif /* DRI3 */
 
     present_screen_info_ptr     info;
 
@@ -197,6 +201,7 @@ struct present_screen_priv {
     present_priv_queue_vblank_ptr       queue_vblank;
     present_priv_flush_ptr              flush;
     present_priv_flush_fenced_ptr       flush_fenced;
+    present_flush_fenced_ptr            driver_flush_fenced;
     present_priv_re_execute_ptr         re_execute;
 
     present_priv_abort_vblank_ptr       abort_vblank;

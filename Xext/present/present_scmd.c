@@ -167,10 +167,20 @@ present_scmd_get_crtc(present_screen_priv_ptr screen_priv, WindowPtr window)
 static uint32_t
 present_scmd_query_capabilities(present_screen_priv_ptr screen_priv)
 {
+    uint32_t capabilities;
+
     if (!screen_priv->info)
         return 0;
 
-    return screen_priv->info->capabilities;
+    capabilities = screen_priv->info->capabilities;
+
+    /* Synced copies need the driver's fenced flush for the release point */
+#ifdef DRI3
+    if (!screen_priv->driver_flush_fenced)
+#endif
+        capabilities &= ~PresentCapabilitySyncobj;
+
+    return capabilities;
 }
 
 static int
@@ -203,6 +213,18 @@ present_flush(WindowPtr window)
         return;
 
     (*screen_priv->info->flush) (window);
+}
+
+static int
+present_scmd_flush_fenced(WindowPtr window)
+{
+    present_screen_priv_ptr screen_priv = present_screen_priv(window->drawable.pScreen);
+
+    if (screen_priv->driver_flush_fenced)
+        return screen_priv->driver_flush_fenced(window);
+
+    present_flush(window);
+    return -1;
 }
 
 static int
@@ -450,8 +472,20 @@ present_flip_idle(ScreenPtr screen)
     present_screen_priv_ptr screen_priv = present_screen_priv(screen);
 
     if (screen_priv->flip_pixmap) {
-        present_pixmap_idle(screen_priv->flip_pixmap, screen_priv->flip_window,
-                            screen_priv->flip_serial, screen_priv->flip_idle_fence);
+#ifdef DRI3
+        struct dri3_syncobj *release_syncobj = screen_priv->flip_release_syncobj;
+
+        /* Synced presents get their release point signalled, not IdleNotify */
+        if (release_syncobj) {
+            release_syncobj->signal(release_syncobj, screen_priv->flip_release_point);
+            if (--release_syncobj->refcount == 0)
+                release_syncobj->free(release_syncobj);
+            screen_priv->flip_release_syncobj = NULL;
+            screen_priv->flip_release_point = 0;
+        } else
+#endif /* DRI3 */
+            present_pixmap_idle(screen_priv->flip_pixmap, screen_priv->flip_window,
+                                screen_priv->flip_serial, screen_priv->flip_idle_fence);
         if (screen_priv->flip_idle_fence)
             present_fence_destroy(screen_priv->flip_idle_fence);
         dixDestroyPixmap(screen_priv->flip_pixmap, screen_priv->flip_pixmap->drawable.id);
@@ -532,6 +566,11 @@ present_flip_notify(present_vblank_ptr vblank, uint64_t ust, uint64_t crtc_msc)
     screen_priv->flip_pixmap = vblank->pixmap;
     screen_priv->flip_sync = vblank->sync_flip;
     screen_priv->flip_idle_fence = vblank->idle_fence;
+#ifdef DRI3
+    screen_priv->flip_release_syncobj = vblank->release_syncobj;
+    screen_priv->flip_release_point = vblank->release_point;
+    vblank->release_syncobj = NULL;
+#endif /* DRI3 */
 
     vblank->pixmap = NULL;
     vblank->idle_fence = NULL;
@@ -757,7 +796,9 @@ present_scmd_pixmap(WindowPtr window,
     present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
 
 #ifdef DRI3
-    if (acquire_syncobj || release_syncobj)
+    if ((acquire_syncobj || release_syncobj) &&
+        (!screen_priv ||
+         !(screen_priv->query_capabilities(screen_priv) & PresentCapabilitySyncobj)))
         return BadValue;
 #endif /* DRI3 */
 
@@ -916,6 +957,16 @@ present_scmd_flip_destroy(ScreenPtr screen)
     present_flip_idle(screen);
 }
 
+Bool
+present_scmd_supports_syncobj(void)
+{
+#ifdef DRI3
+    return TRUE;
+#else
+    return FALSE;
+#endif /* DRI3 */
+}
+
 void
 present_scmd_init_mode_hooks(present_screen_priv_ptr screen_priv)
 {
@@ -931,6 +982,7 @@ present_scmd_init_mode_hooks(present_screen_priv_ptr screen_priv)
 
     screen_priv->queue_vblank       =   &present_queue_vblank;
     screen_priv->flush              =   &present_flush;
+    screen_priv->flush_fenced       =   &present_scmd_flush_fenced;
     screen_priv->re_execute         =   &present_re_execute;
 
     screen_priv->abort_vblank       =   &present_scmd_abort_vblank;
